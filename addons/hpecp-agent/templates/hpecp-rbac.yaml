@@ -1,0 +1,144 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpecp-agent
+rules:
+- apiGroups:
+  - hpecp.hpe.com
+  resources:
+  - "*"
+  verbs:
+  - "*"
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - roles
+  - rolebindings
+  verbs:
+  - "*"
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - "*"
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - namespaces
+  - resourcequotas
+  - serviceaccounts
+  - services
+  - services/finalizers
+  - endpoints
+  - events
+  - configmaps
+  - secrets
+  - pods/exec
+  verbs:
+  - "*"
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
+  verbs:
+  - "*"
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - replicasets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resourceNames:
+  - hpecp-agent
+  resources:
+  - deployments/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - mutatingwebhookconfigurations
+  verbs:
+  - "*"
+@@@@PODPRESETS@@@@
+- apiGroups:
+  - monitoring.coreos.com
+  resources:
+  - servicemonitors
+  verbs:
+  - get
+  - create
+
+---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hpecp-agent
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hpecp-agent
+subjects:
+- kind: ServiceAccount
+  name: hpecp-agent
+  namespace: hpecp
+roleRef:
+  kind: ClusterRole
+  name: hpecp-agent
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpecp-fsmount
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - "list"
+
+---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hpecp-fsmount
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hpecp-fsmount
+subjects:
+- kind: ServiceAccount
+  name: hpecp-fsmount
+  namespace: hpecp
+roleRef:
+  kind: ClusterRole
+  name: hpecp-fsmount
+  apiGroup: rbac.authorization.k8s.io
+

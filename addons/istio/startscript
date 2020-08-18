@@ -1,0 +1,229 @@
+#! /bin/bash
+# Let us wait for some time for entrypoint to fire
+while ! [ -p /tmp/pipe ]; do sleep 5; done
+
+if grep -wq "true" /etc/bootstrap/debugMode; then
+    set -x
+else
+    exec &>> /tmp/pipe
+fi
+
+
+# Source addon-utils
+source /usr/local/bin/addon-utils
+
+TEMPLATES_DIR="/templates"
+WORKSPACE_DIR="/workspace"
+ADDON="istio"
+CONFIG_FILE="/etc/bootstrap/config"
+VERSION="$(cat /etc/bootstrap/version)"
+FROM_VERSION="$(cat /etc/bootstrap/from_version)"
+K8S_VERSION="$(cat /tools/k8s_version)"
+
+KIALI_OPERATOR_MANIFEST="$WORKSPACE_DIR/manifests/kiali/kiali-operator.yaml"
+KIALI_MANIFEST="$WORKSPACE_DIR/manifests/kiali/kiali.yaml"
+KIALI_VERSION="v1.19.0"
+
+ISTIO_VERSION="1.6.1"
+ISTIO_INSTALL_DIR="/$WORKSPACE_DIR/istio-$ISTIO_VERSION"
+ISTIO_HPECP_DEFAULT_MANIFEST="/$WORKSPACE_DIR/manifests/istio-hpecp-default.yaml"
+
+INSTALL_RETRIES=3
+INSTALL_RETRY_BACKOFF=15
+
+INGRESSGATEWAY_SERVICE_IMPORT='{
+    "category":"default",
+    "importName":"istio-ingress",
+    "targetName":"istio-ingressgateway",
+    "targetNamespace":"istio-system",
+    "targetPorts":[{"importName":"http-istio","targetName":"http2"}]
+}'
+
+# Utility functions to set error and initialize on the deployment configmap
+set_deployment_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"initialize":"false","error":"false"}}'
+}
+
+set_deployment_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"initialize":"false","error":"true"}}'
+}
+
+clear_rollback() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"rollback":"false"}}'
+}
+
+set_reconfigure_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"reconfigure":"false","error":"false"}}'
+}
+
+set_reconfigure_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"reconfigure":"false","error":"true"}}'
+}
+
+set_upgrade_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"upgrade":"false","error":"false"}}'
+}
+
+set_upgrade_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"upgrade":"false","error":"true"}}'
+}
+
+# install related action for deploying the istio
+# bdconfig (bds_XXX_YYY) variables are available as environnment variables
+# /etc/bootstrap/config files are available through configmap
+install() {
+    echo "$(date): Starting istio install process"
+
+    # copy from templates to workspace
+    chmod 755 $WORKSPACE_DIR
+    cp -a $TEMPLATES_DIR/* $WORKSPACE_DIR
+    cd $WORKSPACE_DIR
+
+    # Pre install check.
+    $ISTIO_INSTALL_DIR/bin/istioctl experimental precheck
+    if [ $? -ne 0 ]; then
+        echo "Cluster failed istio pre-check"
+        set_deployment_error
+        return 1
+    fi
+
+    # copy pre-made manifest from /template and populate any airgap prefix for container images.
+    cp $ISTIO_HPECP_DEFAULT_MANIFEST istio.yaml
+    sed -i -e "s|^\(\s*image: \)\([^{]*\/\)|\1$bds_k8s_containerrepo\2|g" istio.yaml
+
+    # Apply custom manifests and check validity.
+    # Retry on failure $INSTALL_RETRIES times with a sleep of $INSTALL_RETRY_BACKOFF between attempts.
+    retries=$INSTALL_RETRIES
+    until [ $retries -eq 0 ]
+    do
+        deployment_status=0
+        retries=$((retries-1))
+        kubectl apply -f istio.yaml
+        deployment_status=$((deployment_status+$?))
+        $ISTIO_INSTALL_DIR/bin/istioctl verify-install -f istio.yaml
+        [[ $deployment_status -eq 0 ]] && break || sleep $INSTALL_RETRY_BACKOFF
+    done
+
+    if [ $retries -eq 0 ]; then
+        echo "Failed to correctly install Istio"
+        rollback
+        set_deployment_error
+        return 1
+    fi
+
+    # Check for ingress-gateway labelled nodes.
+    ingressgateway_nodes=$(kubectl get nodes --selector="istio-ingressgateway=true" -o name)
+    replica_count=$(wc -w <<< "$ingressgateway_nodes")
+
+    # If we have nodes, add the number as replicaCount and patch deployment
+    if [[ $replica_count -gt 0 ]]; then
+        cp $WORKSPACE_DIR/patches/labelled_node_ingressgateway.json patch.json
+        sed -i "s/@@@REPLICA_COUNT@@@/${#ingressgateway_nodes[@]}/g" patch.json
+        kubectl -n istio-system patch deployment/istio-ingressgateway --patch "$(cat patch.json)"
+        if [ $? -ne 0 ]; then
+            echo "failed to patch deployment/istio-ingressgateway"
+            set_deployment_error
+            return 0
+        fi
+
+        cp $WORKSPACE_DIR/patches/horizontal_pod_autoscaler.json patch.json
+        sed -i "s/@@@REPLICA_COUNT@@@/${#ingressgateway_nodes[@]}/g" patch.json
+        kubectl -n istio-system patch horizontalpodautoscaler/istio-ingressgateway --patch "$(cat patch.json)"
+        if [ $? -ne 0 ]; then
+            echo "failed to patch horizontalpodautoscaler/istio-ingressgateway"
+            set_deployment_error
+            return 0
+        fi
+
+        # Default in HPECP is labelled NodePort to allow for automatic svc->hpecp gateway mappings
+        # In this case where dedicated nodes are being used - remove the label for that mapping.
+        kubectl -n istio-system label svc/istio-ingressgateway hpecp.hpe.com/hpecp-internal-gateway-
+    fi
+
+    echo "$(date): Starting Kiali installation"
+    # Deploy the operator into it's own namespace first
+    cp $KIALI_OPERATOR_MANIFEST kiali-operator.yaml
+    sed -i -e "s|^\(\s*image: \)|\1$bds_k8s_containerrepo|g" kiali-operator.yaml
+
+    kubectl -n kiali-operator apply -f kiali-operator.yaml
+    if [ $? -ne 0 ]; then
+        echo "failed to install Kiali operator."
+        set_deployment_error
+        return 0
+    fi
+
+    kubectl apply -f $WORKSPACE_DIR/manifests/kiali/hpecp-agent-rbac.yaml
+    if [ $? -ne 0 ]; then
+        echo "failed to apply RBAC for Kiali"
+        set_deployment_error
+        return 0
+    fi
+
+    # Add ingress gateway as a tenant service import in default category.
+    add_service_import "$INGRESSGATEWAY_SERVICE_IMPORT"
+    if [ $? -ne 0 ]; then
+        echo "Failed to add istio ingress gateway to tenant service imports"
+        set_deployment_error
+        return 0
+    fi
+
+    echo "$(date): Successfully completed Istio install process"
+    set_deployment_success
+    return 0
+}
+
+reconfigure() {
+    echo "$(date): Starting istio reconfigure process"
+
+    set_reconfigure_success
+    return 0
+}
+
+# TEMPLATES_DIR will have the templates from new image and
+# WORKSPACE_DIR will contain the existing modified ones.
+# FROM_VERSION will contain the version that we are upgrading from
+upgrade() {
+    echo "$(date): Starting istio upgrade process"
+    $ISTIO_INSTALL_DIR/bin/istioctl upgrade --dry-run
+    if [ $? -ne 0 ]; then
+        echo "Upgrade not possible. Consult log for errors. Rectify and try again"
+        set_deployment_error
+        return 0
+    fi
+
+    $ISTIO_INSTALL_DIR/bin/istioctl upgrade
+    set_upgrade_success
+    return 0
+    # TODO: kiali upgrade.
+}
+
+rollback() {
+    echo "$(date): Starting istio rollback process"
+    # Delete Kiali
+    kubectl delete -f $KIALI_MANIFEST
+    kubectl delete -f $KIALI_OPERATOR_MANIFEST
+
+    # Delete service import
+    remove_service_import "$INGRESSGATEWAY_SERVICE_IMPORT"
+
+    # Delete Istio.
+    kubectl delete -f $ISTIO_HPECP_DEFAULT_MANIFEST
+    clear_rollback
+    return 0
+}
+
+if [ "$1" == "--install" ]
+then
+    install
+elif [ "$1" == "--rollback" ]
+then
+    rollback
+elif [ "$1" == "--reconfigure" ]
+then
+    reconfigure
+elif [ "$1" == "--upgrade" ]
+then
+    upgrade
+else
+    echo "invalid argument"
+fi

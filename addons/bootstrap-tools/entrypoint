@@ -1,0 +1,3 @@
+#! /bin/bash
+
+mkfifo /tmp/pipe; while true; do cat /tmp/pipe; done

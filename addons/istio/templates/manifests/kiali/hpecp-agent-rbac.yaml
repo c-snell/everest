@@ -1,0 +1,50 @@
+---
+# Role for agent to fully manipulate 'Kialis' objects in the operator namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: kiali-operator
+  name: hpecp-agent-kiali-role
+rules:
+- apiGroups: ["kiali.io"]
+  resources: ["kialis"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+# Role binding for above
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: hpecp-agent-kiali-rolebinding
+  namespace: kiali-operator
+subjects:
+- kind: ServiceAccount
+  name: hpecp-agent
+  namespace: hpecp
+roleRef:
+  kind: Role
+  name: hpecp-agent-kiali-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Cluster role for agent to view 'Kialis' at cluster scope.
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: hpecp-agent-kiali-cluster-role
+rules:
+- apiGroups: ["kiali.io"]
+  resources: ["kialis"]
+  verbs: ["get", "watch", "list"]
+---
+# Binding for the above
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: hpecp-agent-kiali-cluster-rolebinding
+subjects:
+- kind: ServiceAccount
+  name: hpecp-agent
+  namespace: hpecp
+roleRef:
+  kind: ClusterRole
+  name: hpecp-agent-kiali-cluster-role
+  apiGroup: rbac.authorization.k8s.io

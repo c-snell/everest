@@ -1,0 +1,169 @@
+#! /bin/bash
+# Wait until entrypoint fires
+while ! [ -p /tmp/pipe ]; do sleep 5; done
+
+if grep -wq "true" /etc/bootstrap/debugMode; then
+    set -x
+else
+    exec &>> /tmp/pipe
+fi
+
+
+TEMPLATES_DIR="/templates"
+WORKSPACE_DIR="/workspace"
+ADDON="hpecp-monitoring"
+CONFIG_FILE="/etc/bootstrap/config"
+
+DEPLOY_FILENAME="${WORKSPACE_DIR}/monitoring.yaml"
+DEFAULT_K8S_NAMESPACE="kube-system"
+
+configure_monitoring_deployment() {
+
+    K8S_NAMESPACE=$1
+    WRITER_NAME="$bdshared_elasticsearch_writer"
+    WRITER_PASS="$bdshared_elasticsearch_writerpass"
+
+    cp ${WORKSPACE_DIR}/monitoring-template.yaml ${DEPLOY_FILENAME}
+    sed -i -e "s|@@@elasticwriter@@@|${WRITER_NAME}|g"  \
+        -e "s|@@@elasticwriterpass@@@|${WRITER_PASS}|g" \
+        -e "s|@@@VERSION@@@|$METRICBEAT_VERSION|g"    \
+        -e "s|@@@K8SNAMESPACE@@@|${K8S_NAMESPACE}|g"    \
+        -e "s|^\(\s*image: \)|\1$bds_k8s_containerrepo|g" ${DEPLOY_FILENAME}
+
+    if [ "${bds_ha_enabled}" == "Yes" ]; then
+
+        HA_ORIGINAL_PRIMARY=$(echo "$bds_ha_nodes" | cut -d "," -f1)
+        HA_ORIGINAL_SHADOW=$(echo "$bds_ha_nodes" | cut -d "," -f2)
+        HA_ARBITER=$(echo "$bds_ha_nodes" | cut -d "," -f3)
+
+        HOST_SLUG_LINE_1="- name: ELASTICSEARCH_HOST_A"
+        HOST_SLUG_LINE_2="value: ${HA_ORIGINAL_PRIMARY}"
+        HOST_SLUG_LINE_3="- name: ELASTICSEARCH_HOST_B"
+        HOST_SLUG_LINE_4="value: ${HA_ORIGINAL_SHADOW}"
+        HOST_SLUG_LINE_5="- name: ELASTICSEARCH_HOST_C"
+        HOST_SLUG_LINE_6="value: ${HA_ARBITER}"
+
+        HOST_ARRAY_SLUG_LINE_1='hosts: [\x27\$\{ELASTICSEARCH_HOST_A:elasticsearch\}:\$\{ELASTICSEARCH_PORT:9210\}\x27,'
+        HOST_ARRAY_SLUG_LINE_2='        \x27\$\{ELASTICSEARCH_HOST_B:elasticsearch\}:\$\{ELASTICSEARCH_PORT:9210\}\x27,'
+        HOST_ARRAY_SLUG_LINE_3='        \x27\$\{ELASTICSEARCH_HOST_C:elasticsearch\}:\$\{ELASTICSEARCH_PORT:9210\}\x27]'
+
+        sed -i -e "s|@@@HOST_SLUG_LINE_1@@@|${HOST_SLUG_LINE_1}|g"             ${DEPLOY_FILENAME}
+        sed -i -e "s|@@@HOST_SLUG_LINE_2@@@|${HOST_SLUG_LINE_2}|g"             ${DEPLOY_FILENAME}
+        sed -i -e "s|@@@HOST_SLUG_LINE_3@@@|${HOST_SLUG_LINE_3}|g"             ${DEPLOY_FILENAME}
+        sed -i -e "s|@@@HOST_SLUG_LINE_4@@@|${HOST_SLUG_LINE_4}|g"             ${DEPLOY_FILENAME}
+        sed -i -e "s|@@@HOST_SLUG_LINE_5@@@|${HOST_SLUG_LINE_5}|g"             ${DEPLOY_FILENAME}
+        sed -i -e "s|@@@HOST_SLUG_LINE_6@@@|${HOST_SLUG_LINE_6}|g"             ${DEPLOY_FILENAME}
+
+        sed -i -e "s|@@@HOST_ARRAY_SLUG_LINE_1@@@|${HOST_ARRAY_SLUG_LINE_1}|g" ${DEPLOY_FILENAME}
+        sed -i -e "s|@@@HOST_ARRAY_SLUG_LINE_2@@@|${HOST_ARRAY_SLUG_LINE_2}|g" ${DEPLOY_FILENAME}
+        sed -i -e "s|@@@HOST_ARRAY_SLUG_LINE_3@@@|${HOST_ARRAY_SLUG_LINE_3}|g" ${DEPLOY_FILENAME}
+
+        echo "Configuring K8S Monitoring for HA Config via file ${DEPLOY_FILENAME}"
+
+    else
+
+        HOST_SLUG_LINE_1="- name: ELASTICSEARCH_HOST"
+        HOST_SLUG_LINE_2="value: ${bds_network_controllerip}"
+        HOST_ARRAY_SLUG_LINE_1='hosts: [\x27\$\{ELASTICSEARCH_HOST:elasticsearch\}:\$\{ELASTICSEARCH_PORT:9210\}\x27]'
+
+        sed -i -e "s|@@@HOST_SLUG_LINE_1@@@|${HOST_SLUG_LINE_1}|g"             ${DEPLOY_FILENAME}
+        sed -i -e "s|@@@HOST_SLUG_LINE_2@@@|${HOST_SLUG_LINE_2}|g"             ${DEPLOY_FILENAME}
+        sed -i -e "s|@@@HOST_ARRAY_SLUG_LINE_1@@@|${HOST_ARRAY_SLUG_LINE_1}|g" ${DEPLOY_FILENAME}
+
+        # Delete unwanted cluster config slug lines not used in single-elasticsearch-host configuration.
+        sed -i -e '/SLUG_LINE/d' ${DEPLOY_FILENAME}
+
+        echo "Configuring K8S Monitoring for Single Controller: ${bds_network_controllerip} via file ${DEPLOY_FILENAME}"
+    fi
+
+    return 0
+}
+
+# Utility functions to set error and initialize on the deployment configmap
+set_deployment_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"initialize":"false","error":"false"}}'
+}
+
+set_deployment_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"initialize":"false","error":"true"}}'
+}
+
+clear_rollback() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"rollback":"false"}}'
+}
+
+set_reconfigure_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"reconfigure":"false","error":"false"}}'
+}
+
+set_reconfigure_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"reconfigure":"false","error":"true"}}'
+}
+
+set_upgrade_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"upgrade":"false","error":"false"}}'
+}
+
+set_upgrade_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"upgrade":"false","error":"true"}}'
+}
+
+# install related action for deploying the hpecp-monitoring
+# bdconfig (bds_XXX_YYY) variables are available as environnment variables
+# /etc/bootstrap/config files are available through configmap
+install() {
+    echo "$(date): Starting $ADDON install process"
+
+    # copy from templates to workspace
+    chmod 755 $WORKSPACE_DIR
+    cp -a $TEMPLATES_DIR/* $WORKSPACE_DIR
+
+    configure_monitoring_deployment "${DEFAULT_K8S_NAMESPACE}"
+    kubectl -n ${DEFAULT_K8S_NAMESPACE} create -f ${DEPLOY_FILENAME}
+
+    set_deployment_success
+    return 0
+}
+
+reconfigure() {
+    echo "$(date): Starting $ADDON reconfigure process"
+
+    set_reconfigure_success
+    return 0
+}
+
+# TEMPLATES_DIR will have the templates from new image and
+# WORKSPACE_DIR will contain the existing modified ones.
+# FROM_VERSION will contain the version that we are upgrading from
+upgrade() {
+    echo "$(date): Starting $ADDON upgrade process"
+
+    set_upgrade_success
+    return 0
+}
+
+
+rollback() {
+    echo "$(date): Starting $ADDON rollback process"
+
+    kubectl delete -f ${DEPLOY_FILENAME}
+
+    clear_rollback
+    return 0
+}
+
+if [ "$1" == "--install" ]
+then
+    install
+elif [ "$1" == "--rollback" ]
+then
+    rollback
+elif [ "$1" == "--reconfigure" ]
+then
+    reconfigure
+elif [ "$1" == "--upgrade" ]
+then
+    upgrade
+else
+    echo "invalid argument"
+fi

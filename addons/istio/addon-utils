@@ -1,0 +1,49 @@
+#! /bin/bash
+
+add_service_import() {
+    local service_import=$1
+    # test if value is valid json first before attempting any patch
+    service_import=$(jq <<< $service_import)
+    if [ $? -ne 0 ]; then
+        echo "Service import json is invalid."
+        return 1
+    fi
+    local patch="[ {\"op\":\"add\", \"path\": \"/spec/tenantServiceImports/-\", \"value\" : $service_import} ]"
+    kubectl -n hpecp patch hpecpconfig hpecp-global-config --type=json --patch "$patch"
+    return $?
+}
+
+remove_service_import() {
+    local service_import=$1
+    service_import=$(jq <<< $service_import)
+    if [ $? -ne 0 ]; then
+        echo "Service import json is invalid."
+        return 1
+    fi
+
+    local import_name=$(jq '.importName' <<< $service_import)
+
+    # Attempt to specific remove service import and status from hpecp-global-config
+    # on conflict, retry after sleeping for increasing periods of N+jitter.
+    # where N is (1-30) secs and jitter is a random period of msec up to 1000 (1 second)
+    jitter() { shuf -i 0-1000 -n 1; }
+    local retries=0 max_backoff=30
+    until [ $retries -eq $max_backoff ];
+    do
+        local current_config=$(kubectl -n hpecp get hpecpconfig hpecp-global-config -o json)
+        retries=$((retries+1))
+        # Zero out the status.
+        current_config=$(jq '.status = {}' <<< $current_config)
+        new_config=$(jq 'del(.spec.tenantServiceImports[] | select(.importName == '${import_name}'))' <<< $current_config)
+        kubectl apply -f - <<< $new_config
+        [[ $? -eq 0 ]]  && break || sleep $retries.$(jitter)
+    done
+
+    if [ $retries -eq $max_backoff ]; then
+        echo "Failed to remove service import $import_name"
+        return 1
+    fi
+
+    echo "Successfully removed service import $import_name"
+    return 0
+}

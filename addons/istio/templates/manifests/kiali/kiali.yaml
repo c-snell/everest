@@ -1,0 +1,21 @@
+---
+apiVersion: kiali.io/v1alpha1
+kind: Kiali
+metadata:
+  name: kiali
+  labels:
+      hpecp.hpe.com/hpecp-internal-gateway: 'true'
+spec:
+  version: default
+  auth:
+    strategy: token
+  deployment:
+    namespace: istio-system
+    secret_name: kiali
+    service_type: NodePort
+    view_only_mode: false
+  external_services:
+    grafana:
+      url: ""
+    tracing:
+      url: ""

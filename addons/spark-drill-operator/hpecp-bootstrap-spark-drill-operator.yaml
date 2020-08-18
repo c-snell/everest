@@ -1,0 +1,133 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hpecp-bootstrap-spark-drill-operator
+  namespace: hpecp-bootstrap
+data:
+  debugMode: "false"
+  initialize: "true"
+  error: "false"
+  rollback: "false"
+  reconfigure: "false"
+  upgrade: "false"
+  from_version: ""
+  version: "$version$"
+  install.txt: |
+    PYTHON_INCOMPATIBLE_CONTINUE=yes
+    INSTALL_CSI=no
+    OPENSHIFT_ENV=no
+  uninstall.txt: |
+    AGREEMENT=yes
+    REMOVE_CONFIG=yes
+    REMOVE_CSI=no
+    REMOVE_EXTERNAL_INFO=no
+  config: |-
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hpecp-bootstrap-spark-drill-operator
+  namespace: hpecp-bootstrap
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      name: hpecp-bootstrap-spark-drill-operator
+  template:
+    metadata:
+      labels:
+        name: hpecp-bootstrap-spark-drill-operator
+    spec:
+      # This priorityClassName is only supported outside of kube-system in
+      # K8s version 1.17.
+      #priorityClassName: system-cluster-critical
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+          key: node-role.kubernetes.io/master
+        - key: CriticalAddonsOnly
+          operator: Exists
+      serviceAccountName: hpecp-bootstrap
+      # initContainer is used to copy the kubectl binary and helm binary
+      # into a shared emptyDir that the main container can use
+      initContainers:
+      - name: spark-drill-operator-init
+        # Will be replaced by HCP when deploying this deployment
+        image: "$hpecp_bootstrap_repo$/hpecp-bootstrap-tools:$tools_version$"
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 250m
+          limits:
+            memory: 256Mi
+            cpu: 250m
+        envFrom:
+        - configMapRef:
+            name: hpecp-bootstrap-bdconfig
+        volumeMounts:
+          - name: config-volume
+            mountPath: /etc/bootstrap
+          - name: tools-volume
+            mountPath: /tools
+        command:
+          - "sh"
+          - "-c"
+          - |
+            /usr/local/bin/setup.sh
+      containers:
+      - name: spark-drill-operator
+        # Will be replaced by HCP when deploying this deployment
+        image: "$hpecp_bootstrap_repo$/hpecp-bootstrap-spark-drill-operator:$version$"
+        imagePullPolicy: IfNotPresent
+        # postStart will launch the startscript based on phase in configmap
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 250m
+          limits:
+            memory: 256Mi
+            cpu: 250m
+        lifecycle:
+          postStart:
+            exec:
+              command:
+                - "sh"
+                - "-c"
+                - |
+                  if grep -wq "true" /etc/bootstrap/debugMode; then
+                    exit 0;
+                  fi;
+                  if grep -wq "true" /etc/bootstrap/initialize; then
+                    /usr/local/bin/startscript --install;
+                  fi;
+                  if grep -wq "true" /etc/bootstrap/rollback; then
+                    /usr/local/bin/startscript --rollback;
+                  fi;
+                  if grep -wq "true" /etc/bootstrap/reconfigure; then
+                    /usr/local/bin/startscript --reconfigure;
+                  fi;
+                  if grep -wq "true" /etc/bootstrap/upgrade; then
+                    /usr/local/bin/startscript --upgrade;
+                  fi
+        envFrom:
+        - configMapRef:
+            name: hpecp-bootstrap-bdconfig
+        volumeMounts:
+          - name: tools-volume
+            mountPath: /tools
+          - name: config-volume
+            mountPath: /etc/bootstrap
+          - name: workspace-volume
+            mountPath: /workspace
+      volumes:
+        - name: tools-volume
+          emptyDir:
+            sizeLimit: "1Gi"
+        - name: config-volume
+          configMap:
+            defaultMode: 0666
+            name: hpecp-bootstrap-spark-drill-operator
+        - name: workspace-volume
+          $workspace_volume_type$
+            $workspace_volume_info$

@@ -1,0 +1,10 @@
+- apiGroups:
+  - settings.k8s.io
+  resources:
+  - podpresets
+  verbs:
+  - get
+  - create
+  - delete
+  - list
+  - watch

@@ -1,0 +1,125 @@
+#! /bin/bash
+# Wait until entrypoint fires
+while ! [ -p /tmp/pipe ]; do sleep 5; done
+
+if grep -wq "true" /etc/bootstrap/debugMode; then
+    set -x
+else
+    exec &>> /tmp/pipe
+fi
+
+
+TEMPLATES_DIR="/templates"
+WORKSPACE_DIR="/workspace"
+ADDON="nimble-csi"
+CONFIG_FILE="/etc/bootstrap/config"
+VERSION="$(cat /etc/bootstrap/version)"
+FROM_VERSION="$(cat /etc/bootstrap/from_version)"
+K8S_VERSION="$(cat /tools/k8s_version)"
+
+hpe_csi_file() {
+    MAJOR_VER="${K8S_VERSION%%.*}"
+    REMAINDER="${K8S_VERSION#*.}"
+    MINOR_VER="${REMAINDER%%.*}"
+    echo hpe-csi-k8s-${MAJOR_VER}.${MINOR_VER}-template.yaml
+}
+
+# Utility functions to set error and initialize on the deployment configmap
+set_deployment_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"initialize":"false","error":"false"}}'
+}
+
+set_deployment_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"initialize":"false","error":"true"}}'
+}
+
+clear_rollback() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"rollback":"false"}}'
+}
+
+set_reconfigure_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"reconfigure":"false","error":"false"}}'
+}
+
+set_reconfigure_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"reconfigure":"false","error":"true"}}'
+}
+
+set_upgrade_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"upgrade":"false","error":"false"}}'
+}
+
+set_upgrade_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"upgrade":"false","error":"true"}}'
+}
+
+# install related action for deploying the nimble-csi
+# bdconfig (bds_XXX_YYY) variables are available as environnment variables
+# /etc/bootstrap/config files are available through configmap
+install() {
+    echo "$(date): Starting $ADDON install process"
+
+    # copy from templates to workspace
+    chmod 755 $WORKSPACE_DIR
+    cp -a $TEMPLATES_DIR/* $WORKSPACE_DIR
+
+    HPE_CSI_TEMPLATE=$(hpe_csi_file)
+
+    cp "$WORKSPACE_DIR/$HPE_CSI_TEMPLATE"  $WORKSPACE_DIR/hpe-csi.yaml
+    sed -i -e "s|^\(\s*image: \)|\1$bds_k8s_containerrepo|g" $WORKSPACE_DIR/hpe-csi.yaml
+
+    cp $WORKSPACE_DIR/nimble-csp-template.yaml $WORKSPACE_DIR/nimble-csp.yaml
+    sed -i -e "s|^\(\s*image: \)|\1$bds_k8s_containerrepo|g" $WORKSPACE_DIR/nimble-csp.yaml
+
+    kubectl create -f $WORKSPACE_DIR/hpe-csi.yaml
+    kubectl create -f $WORKSPACE_DIR/nimble-csp.yaml
+    kubectl create -f $WORKSPACE_DIR/hpe-linux-config.yaml
+
+    set_deployment_success
+    return 0
+}
+
+reconfigure() {
+    echo "$(date): Starting $ADDON reconfigure process"
+
+    set_reconfigure_success
+    return 0
+}
+
+# TEMPLATES_DIR will have the templates from new image and
+# WORKSPACE_DIR will contain the existing modified ones.
+# FROM_VERSION will contain the version that we are upgrading from
+upgrade() {
+    echo "$(date): Starting $ADDON upgrade process"
+
+    set_upgrade_success
+    return 0
+}
+
+
+rollback() {
+    echo "$(date): Starting $ADDON rollback process"
+
+    kubectl delete -f $WORKSPACE_DIR/hpe-linux-config.yaml
+    kubectl delete -f $WORKSPACE_DIR/nimble-csp.yaml
+    kubectl delete -f $WORKSPACE_DIR/hpe-csi.yaml
+
+    clear_rollback
+    return 0
+}
+
+if [ "$1" == "--install" ]
+then
+    install
+elif [ "$1" == "--rollback" ]
+then
+    rollback
+elif [ "$1" == "--reconfigure" ]
+then
+    reconfigure
+elif [ "$1" == "--upgrade" ]
+then
+    upgrade
+else
+    echo "invalid argument"
+fi

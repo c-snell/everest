@@ -1,0 +1,34 @@
+# ------------------- Nagios Service Account ------------------- #
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bd-nagios
+---
+# ------------------- Nagios Role & Role Binding ------------------- #
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: bd-nagios
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+---
+
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: bd-nagios
+roleRef:
+  kind: ClusterRole
+  name: bd-nagios
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+- kind: ServiceAccount
+  name: bd-nagios
+  namespace: kube-system

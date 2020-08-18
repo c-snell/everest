@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hpecp-bootstrap
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hpecp-bootstrap
+  namespace: hpecp-bootstrap
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpecp-bootstrap
+rules:
+  - apiGroups:
+    - '*'
+    resources:
+    - '*'
+    verbs:
+    - '*'
+  - nonResourceURLs:
+    - '*'
+    verbs:
+    - '*'
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hpecp-bootstrap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hpecp-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: hpecp-bootstrap
+    namespace: hpecp-bootstrap
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hpecp-bootstrap-bdconfig
+  namespace: hpecp-bootstrap
+data:
+  # Following will be replaced by hpe-cp
+  bds_k8s_containerrepo: "$bds_k8s_containerrepo$"
+  bds_k8s_version: "$bds_k8s_version$"
+  bds_k8s_dnsdomain: "$bds_k8s_dnsdomain$"
+  bds_storage_dockersource: "$bds_storage_dockersource$"
+  bdshared_elasticsearch_writer: "$bdshared_elasticsearch_writer$"
+  bdshared_elasticsearch_writerpass: "$bdshared_elasticsearch_writerpass$"
+  bds_network_controllerip: $bds_network_controllerip$"
+  bds_ha_enabled: "$bds_ha_enabled$"
+  bds_ha_nodes: $bds_ha_nodes$"

@@ -1,0 +1,190 @@
+#! /bin/bash
+# Wait until entrypoint fires
+while ! [ -p /tmp/pipe ]; do sleep 5; done
+
+if grep -wq "true" /etc/bootstrap/debugMode; then
+    set -x
+else
+    exec &>> /tmp/pipe
+fi
+
+
+TEMPLATES_DIR="/templates"
+WORKSPACE_DIR="/workspace"
+ADDON="kubedirector"
+CONFIG_FILE="/etc/bootstrap/config"
+VERSION="$(cat /etc/bootstrap/version)"
+FROM_VERSION="$(cat /etc/bootstrap/from_version)"
+K8S_VERSION="$(cat /tools/k8s_version)"
+
+OPERATOR_NAMESPACE="hpecp"
+
+# Utility functions to set error and initialize on the deployment configmap
+set_deployment_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"initialize":"false","error":"false"}}'
+}
+
+set_deployment_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"initialize":"false","error":"true"}}'
+}
+
+clear_rollback() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"rollback":"false"}}'
+}
+
+set_reconfigure_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"reconfigure":"false","error":"false"}}'
+}
+
+set_reconfigure_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"reconfigure":"false","error":"true"}}'
+}
+
+set_upgrade_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"upgrade":"false","error":"false"}}'
+}
+
+set_upgrade_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"upgrade":"false","error":"true"}}'
+}
+
+# install related action for deploying the kubedirector
+# bdconfig (bds_XXX_YYY) variables are available as environnment variables
+# /etc/bootstrap/config files are available through configmap
+install() {
+    echo "$(date): Starting $ADDON install process"
+
+    # copy from templates to workspace
+    chmod 755 $WORKSPACE_DIR
+    cp -a $TEMPLATES_DIR/* $WORKSPACE_DIR
+
+    # Add install related actions
+    kubectl -n $OPERATOR_NAMESPACE create -f $WORKSPACE_DIR/kd-rbac.yaml
+    kubectl -n $OPERATOR_NAMESPACE create -f $WORKSPACE_DIR/crds
+
+    # Deploy KubeDirector
+    cp $WORKSPACE_DIR/kd-deployment-prebuilt-template.yaml $WORKSPACE_DIR/kd-deployment-prebuilt.yaml
+    sed -i -e "s|^\(\s*image: \)|\1$bds_k8s_containerrepo|g" \
+           -e "s|@@@@VERSION@@@@|$KUBEDIRECTOR_VERSION|g" \
+        $WORKSPACE_DIR/kd-deployment-prebuilt.yaml
+
+    kubectl -n $OPERATOR_NAMESPACE create -f $WORKSPACE_DIR/kd-deployment-prebuilt.yaml
+    Retries=30
+    while [ "$Retries" -gt 0 ]; do
+        if kubectl -n $OPERATOR_NAMESPACE get pods -l name=kubedirector;
+        then
+            break
+        fi
+        echo "Waiting for KubeDirector to start..."
+        Retries=$(( Retries - 1 ))
+        sleep 10
+    done
+    if [[ "$Retries" -eq 0 ]]; then
+        echo "Failed waiting for KubeDirector to start."
+        set_deployment_error
+        exit 0
+    fi
+    Retries=30
+    while [ "$Retries" -gt 0 ]; do
+        SvcAddr=$(kubectl -n $OPERATOR_NAMESPACE get svc kubedirector-validator -o jsonpath="{.spec.clusterIP}")
+        if [ "$SvcAddr" != '' ]; then
+            Health=$(curl --connect-timeout 2 --noproxy '*' -k "https://$SvcAddr:443/healthz")
+            if [ "$Health" == 'ok' ]; then
+                break
+            fi
+        fi
+        echo "Waiting for KubeDirector admission control hook to be responsive..."
+        Retries=$(( Retries - 1 ))
+        sleep 10
+    done
+    if [[ "$Retries" -eq 0 ]]; then
+        echo "Failed waiting for KubeDirector admission control hook to respond."
+        set_deployment_error
+        exit 0
+    fi
+    # Create config CR after modifying the cluster domain and the native
+    # systemd support flag.
+    sed -i "s|@@@@CLUSTER_DOMAIN@@@@|$bds_k8s_dnsdomain|g" $WORKSPACE_DIR/config-crs/cr-kd-config.yaml
+    if [ "$bds_storage_dockersource" == "redhat" ]
+    then
+        sed -i 's|@@@@SYSTEMD_SUPPORT@@@@|true|g' $WORKSPACE_DIR/config-crs/cr-kd-config.yaml
+    else
+        sed -i 's|@@@@SYSTEMD_SUPPORT@@@@|false|g' $WORKSPACE_DIR/config-crs/cr-kd-config.yaml
+    fi
+    kubectl -n $OPERATOR_NAMESPACE create -f $WORKSPACE_DIR/config-crs/cr-kd-config.yaml
+
+    # Modifiy defaultImageRepoTag and also imageRepoTag for webterm app and all
+    # other app-crs
+    sed -i -e "s|^\(\s*\"defaultImageRepoTag\": \"\)|\1$bds_k8s_containerrepo|g" \
+        $WORKSPACE_DIR/cr-app-webterm.json
+    sed -i -e "s|^\(\s*\"imageRepoTag\": \"\)|\1$bds_k8s_containerrepo|g" \
+        $WORKSPACE_DIR/cr-app-webterm.json
+    sed -i -e "s|^\(\s*\"defaultImageRepoTag\": \"\)|\1$bds_k8s_containerrepo|g" \
+        $WORKSPACE_DIR/app-crs/*
+    sed -i -e "s|^\(\s*\"imageRepoTag\": \"\)|\1$bds_k8s_containerrepo|g" \
+        $WORKSPACE_DIR/app-crs/*
+
+    kubectl -n $OPERATOR_NAMESPACE create -f $WORKSPACE_DIR/cr-app-webterm.json
+
+    # All kubedirector apps must go in kd-apps namespace.
+    kubectl create ns kd-apps
+
+    # Create all the example apps.
+    kubectl -n kd-apps create -f $WORKSPACE_DIR/app-crs
+
+    set_deployment_success
+    return 0
+}
+
+reconfigure() {
+    echo "$(date): Starting $ADDON reconfigure process"
+
+    set_reconfigure_success
+    return 0
+}
+
+# TEMPLATES_DIR will have the templates from new image and
+# WORKSPACE_DIR will contain the existing modified ones.
+# FROM_VERSION will contain the version that we are upgrading from
+upgrade() {
+    echo "$(date): Starting $ADDON upgrade process"
+
+    set_upgrade_success
+    return 0
+}
+
+
+rollback() {
+    echo "$(date): Starting $ADDON rollback process"
+
+    kubectl -n $OPERATOR_NAMESPACE delete KubeDirectorCluster --all --now
+    kubectl -n $OPERATOR_NAMESPACE delete KubeDirectorApp --all --now
+    kubectl -n $OPERATOR_NAMESPACE delete KubeDirectorConfig --all --now
+
+    kubectl -n $OPERATOR_NAMESPACE delete -f $WORKSPACE_DIR/kd-deployment-prebuilt.yaml --now
+
+    kubectl -n $OPERATOR_NAMESPACE delete -f $WORKSPACE_DIR/crds
+
+    kubectl -n $OPERATOR_NAMESPACE delete -f $WORKSPACE_DIR/kd-rbac.yaml
+
+    kubectl delete namespace kd-apps
+
+    clear_rollback
+    return 0
+}
+
+if [ "$1" == "--install" ]
+then
+    install
+elif [ "$1" == "--rollback" ]
+then
+    rollback
+elif [ "$1" == "--reconfigure" ]
+then
+    reconfigure
+elif [ "$1" == "--upgrade" ]
+then
+    upgrade
+else
+    echo "invalid argument"
+fi

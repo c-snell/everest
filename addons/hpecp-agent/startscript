@@ -1,0 +1,206 @@
+#! /bin/bash
+# Wait until entrypoint fires
+while ! [ -p /tmp/pipe ]; do sleep 5; done
+
+if grep -wq "true" /etc/bootstrap/debugMode; then
+    set -x
+else
+    exec &>> /tmp/pipe
+fi
+
+
+TEMPLATES_DIR="/templates"
+WORKSPACE_DIR="/workspace"
+ADDON="hpecp-agent"
+CONFIG_FILE="/etc/bootstrap/config"
+VERSION="$(cat /etc/bootstrap/version)"
+FROM_VERSION="$(cat /etc/bootstrap/from_version)"
+K8S_VERSION="$(cat /tools/k8s_version)"
+
+TENANT_NET_ISOLATION_TAG="tenantNetworkIsolation=true"
+OPERATOR_NAMESPACE="hpecp"
+
+# FsMount related settings
+[ -n "$(kubectl api-resources --no-headers --api-group=settings.k8s.io)" ] \
+    && PODPRESETS_SUPPORTED=True || PODPRESETS_SUPPORTED=False
+[ $PODPRESETS_SUPPORTED == True ] && FSMOUNT_ENABLED=true || FSMOUNT_ENABLED=false
+
+# Utility functions to set error and initialize on the deployment configmap
+set_deployment_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"initialize":"false","error":"false"}}'
+}
+
+set_deployment_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"initialize":"false","error":"true"}}'
+}
+
+clear_rollback() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"rollback":"false"}}'
+}
+
+set_reconfigure_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"reconfigure":"false","error":"false"}}'
+}
+
+set_reconfigure_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"reconfigure":"false","error":"true"}}'
+}
+
+set_upgrade_success() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"upgrade":"false","error":"false"}}'
+}
+
+set_upgrade_error() {
+    kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"upgrade":"false","error":"true"}}'
+}
+
+# install related action for deploying the hpecp-agent
+# bdconfig (bds_XXX_YYY) variables are available as environnment variables
+# /etc/bootstrap/config files are available through configmap
+install() {
+    echo "$(date): Starting $ADDON install process"
+
+    # copy from templates to workspace
+    chmod 755 $WORKSPACE_DIR
+    cp -a $TEMPLATES_DIR/* $WORKSPACE_DIR
+
+    kubectl label namespace $OPERATOR_NAMESPACE $TENANT_NET_ISOLATION_TAG
+
+    if [ $PODPRESETS_SUPPORTED == True ]; then
+        # translate all the newlines so that PODPRESETS_RBAC_YAML
+        # can be used in a sed substitute command below.
+        PODPRESETS_RBAC_YAML=$(sed '{:q;N;s/\n/\\n/g;t q}' $WORKSPACE_DIR/podpresets-rbac.yaml)
+    else
+        PODPRESETS_RBAC_YAML=""
+    fi
+    sed -i -e "s|@@@@PODPRESETS@@@@|$PODPRESETS_RBAC_YAML|"  \
+        $WORKSPACE_DIR/hpecp-rbac.yaml
+
+    kubectl -n $OPERATOR_NAMESPACE create -f $WORKSPACE_DIR/hpecp-rbac.yaml
+    kubectl -n $OPERATOR_NAMESPACE create -f $WORKSPACE_DIR/crds
+
+    FSMOUNT_DTAP_REPO="$bds_k8s_containerrepo""bluedata"
+
+    # Deploy HPECP Agent
+    echo "deploying hpecp agent"
+    cp $WORKSPACE_DIR/hpecp-deployment-prebuilt-template.yaml $WORKSPACE_DIR/hpecp-deployment-prebuilt.yaml
+    sed -i -e "s|^\(\s*image: \)|\1$bds_k8s_containerrepo|g" \
+           -e "s|@@@@VERSION@@@@|$HPECPAGENT_VERSION|g" \
+           -e "s|@@@@FSMOUNT_VERSION@@@@|$FSMOUNT_VERSION|g" \
+           -e "s|@@@@FSMOUNT_DTAP_REPO@@@@|$FSMOUNT_DTAP_REPO|g" \
+           -e "s|@@@@DTAP_VERSION@@@@|$DTAP_VERSION|g" \
+           -e "s|@@@@KIALI_VERSION@@@@|$KIALI_VERSION|g" \
+        $WORKSPACE_DIR/hpecp-deployment-prebuilt.yaml
+
+    kubectl -n $OPERATOR_NAMESPACE create -f $WORKSPACE_DIR/hpecp-deployment-prebuilt.yaml
+    Retries=30
+    while [ "$Retries" -gt 0 ]; do
+        if kubectl -n $OPERATOR_NAMESPACE get pods -l name=hpecp-agent;
+        then
+            break
+        fi
+        echo "Waiting for HPECP Agent to start..."
+        Retries=$(( Retries - 1 ))
+        sleep 10
+    done
+    if [[ "$Retries" -eq 0 ]]; then
+        echo "Failed waiting for HPECP Agent to start."
+        set_deployment_error
+        exit 0
+    fi
+    # Wait upto 15 minutes for the agent to respond
+    Retries=30
+    while [ "$Retries" -gt 0 ]; do
+        SvcAddr=$(kubectl -n $OPERATOR_NAMESPACE get svc hpecp-validator -o jsonpath="{.spec.clusterIP}")
+        if [ "$SvcAddr" != '' ]; then
+            Health=$(curl --connect-timeout 2 --noproxy '*' -k "https://$SvcAddr:443/healthz")
+            if [ "$Health" == 'ok' ]; then
+                break
+            fi
+        fi
+        echo "Waiting for HPECP Agent admission control hook to be responsive..."
+        Retries=$(( Retries - 1 ))
+        sleep 30
+    done
+    if [[ "$Retries" -eq 0 ]]; then
+        echo "Failed waiting for HPECP Agent admission control hook to respond."
+        set_deployment_error
+        exit 0
+    fi
+    # Create config CR after modifying the unrestricted-mounts namespace.
+    sed -i -e "s|@@@@OPERATOR_NAMESPACE@@@@|$OPERATOR_NAMESPACE|g" \
+           -e "s|@@@@FSMOUNT_ENABLED@@@@|$FSMOUNT_ENABLED|" \
+        $WORKSPACE_DIR/config-crs/cr-hpecp-config.yaml
+    kubectl -n $OPERATOR_NAMESPACE create -f $WORKSPACE_DIR/config-crs/cr-hpecp-config.yaml
+    # Make sure the tenantServiceImports field exists with an emptylist value,
+    # for easier patching later. We can't specify it in kubectl create because
+    # that will strip out the emptylist.
+    kubectl -n $OPERATOR_NAMESPACE patch hpecpconfig hpecp-global-config --type=json \
+        -p '[ { "op":"add", "path": "/spec/tenantServiceImports", "value": [] } ]'
+
+    # Patch a shorter timeout into the "soft" webhook defined by HPECP Agent;
+    # it is intended that this webhook being down should not block client
+    # requests. Therefore a shorter timeout is needed so that webhook timeout
+    # can happen before any API client timeout.
+    # Ideally the agent would set this when creating the webhook, but we need to
+    # move to a more recent version of the operator SDK (v0.11 or better) to
+    # get access to that property in the APIs.
+    WebhookPatch="{\"webhooks\":[{\"name\":\"soft-validate.hpecp.hpe.com\",\"timeoutSeconds\":10}]}"
+    kubectl patch MutatingWebhookConfiguration hpecp-webhook -p "$WebhookPatch"
+
+    set_deployment_success
+    return 0
+}
+
+reconfigure() {
+    echo "$(date): Starting $ADDON reconfigure process"
+
+    set_reconfigure_success
+    return 0
+}
+
+# TEMPLATES_DIR will have the templates from new image and
+# WORKSPACE_DIR will contain the existing modified ones.
+# FROM_VERSION will contain the version that we are upgrading from
+upgrade() {
+    echo "$(date): Starting $ADDON upgrade process"
+
+    set_upgrade_success
+    return 0
+}
+
+
+rollback() {
+    echo "$(date): Starting $ADDON rollback process"
+
+    kubectl -n $OPERATOR_NAMESPACE delete HPECPFsMount --all --now
+    kubectl -n $OPERATOR_NAMESPACE delete HPECPTenant --all --now
+    kubectl -n $OPERATOR_NAMESPACE delete HPECPConfig --all --now
+
+    kubectl -n $OPERATOR_NAMESPACE delete -f $WORKSPACE_DIR/hpecp-deployment-prebuilt.yaml --now
+
+    kubectl -n $OPERATOR_NAMESPACE delete -f $WORKSPACE_DIR/crds
+
+    kubectl -n $OPERATOR_NAMESPACE delete -f $WORKSPACE_DIR/hpecp-rbac.yaml
+
+    kubectl delete namespace $OPERATOR_NAMESPACE
+
+    clear_rollback
+    return 0
+}
+
+if [ "$1" == "--install" ]
+then
+    install
+elif [ "$1" == "--rollback" ]
+then
+    rollback
+elif [ "$1" == "--reconfigure" ]
+then
+    reconfigure
+elif [ "$1" == "--upgrade" ]
+then
+    upgrade
+else
+    echo "invalid argument"
+fi
