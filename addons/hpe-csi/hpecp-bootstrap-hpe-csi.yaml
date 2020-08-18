@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: hpecp-bootstrap-nimble-csi
+  name: hpecp-bootstrap-hpe-csi
   namespace: hpecp-bootstrap
 data:
   debugMode: "false"
@@ -18,17 +18,17 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: hpecp-bootstrap-nimble-csi
+  name: hpecp-bootstrap-hpe-csi
   namespace: hpecp-bootstrap
 spec:
   replicas: 0
   selector:
     matchLabels:
-      name: hpecp-bootstrap-nimble-csi
+      name: hpecp-bootstrap-hpe-csi
   template:
     metadata:
       labels:
-        name: hpecp-bootstrap-nimble-csi
+        name: hpecp-bootstrap-hpe-csi
     spec:
       # This priorityClassName is only supported outside of kube-system in
       # K8s version 1.17.
@@ -43,7 +43,7 @@ spec:
       # initContainer is used to copy the kubectl binary and helm binary
       # into a shared emptyDir that the main container can use
       initContainers:
-      - name: nimble-csi-init
+      - name: hpe-csi-init
         # Will be replaced by HCP when deploying this deployment
         image: "$hpecp_bootstrap_repo$/hpecp-bootstrap-tools:$tools_version$"
         imagePullPolicy: IfNotPresent
@@ -68,9 +68,9 @@ spec:
           - |
             /usr/local/bin/setup.sh
       containers:
-      - name: nimble-csi
+      - name: hpe-csi
         # Will be replaced by HCP when deploying this deployment
-        image: "$hpecp_bootstrap_repo$/hpecp-bootstrap-nimble-csi:$version$"
+        image: "$hpecp_bootstrap_repo$/hpecp-bootstrap-hpe-csi:$version$"
         imagePullPolicy: IfNotPresent
         # postStart will launch the startscript based on phase in configmap
         resources:
@@ -119,7 +119,7 @@ spec:
         - name: config-volume
           configMap:
             defaultMode: 0666
-            name: hpecp-bootstrap-nimble-csi
+            name: hpecp-bootstrap-hpe-csi
         - name: workspace-volume
           $workspace_volume_type$
             $workspace_volume_info$

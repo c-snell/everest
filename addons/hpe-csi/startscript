@@ -11,7 +11,7 @@ fi
 
 TEMPLATES_DIR="/templates"
 WORKSPACE_DIR="/workspace"
-ADDON="nimble-csi"
+ADDON="hpe-csi"
 CONFIG_FILE="/etc/bootstrap/config"
 VERSION="$(cat /etc/bootstrap/version)"
 FROM_VERSION="$(cat /etc/bootstrap/from_version)"
