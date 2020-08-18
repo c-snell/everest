@@ -140,10 +140,12 @@ spec:
             - name: socket-dir
               mountPath: /var/lib/csi/sockets/pluginproxy/
         - name: hpe-csi-driver
-          image: hpestorage/csi-driver:edge
+          image: hpestorage/csi-driver:v1.2.0
           args :
             - "--endpoint=$(CSI_ENDPOINT)"
             - "--flavor=kubernetes"
+            - "--pod-monitor"
+            - "--pod-monitor-interval=30"
           env:
             - name: CSI_ENDPOINT
               value: unix:///var/lib/csi/sockets/pluginproxy/csi.sock
@@ -157,6 +159,8 @@ spec:
               mountPath: /etc/kubernetes
             - name: hpeconfig
               mountPath: /etc/hpe-storage
+            - name: root-dir
+              mountPath: /host
       volumes:
         - name: socket-dir
           emptyDir: {}
@@ -165,10 +169,13 @@ spec:
             path: /var/log
         - name: k8s
           hostPath:
-             path: /etc/kubernetes/
+            path: /etc/kubernetes/
         - name: hpeconfig
           hostPath:
-              path: /etc/hpe-storage/
+            path: /etc/hpe-storage/
+        - name: root-dir
+          hostPath:
+            path: /
 
 ---
 
@@ -195,8 +202,8 @@ rules:
     resources: ["nodes"]
     verbs: ["get", "list"]
   - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list"]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "create"]
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "create"]
@@ -218,7 +225,12 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["list", "watch", "create", "update", "patch"]
-
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "update", "patch", "delete"]
 
 ---
 
@@ -423,7 +435,7 @@ spec:
             - name: registration-dir
               mountPath: /registration
         - name: hpe-csi-driver
-          image: hpestorage/csi-driver:edge
+          image: hpestorage/csi-driver:v1.2.0
           args :
             - "--endpoint=$(CSI_ENDPOINT)"
             - "--node-service"
@@ -435,6 +447,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: DISABLE_NODE_CONFORMANCE
+              value: "false"
           imagePullPolicy: "Always"
           securityContext:
             privileged: true

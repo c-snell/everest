@@ -1,13 +1,10 @@
 These yaml files are sourced from:
     https://github.com/hpe-storage/co-deployments/tree/master/yaml/csi-driver
 
-There's also an upstream repo at:
-    https://sjcartifactory.eng.nimblestorage.com/artifactory/dcs_k8s-local/co-deployments_master/XX/yaml/
-
 Update procedure:
 
-# Can be edge, v1.0.0, v1.1.0
-version="edge"
+# Can be v1.0.0, v1.1.0, v1.2.0
+version="v1.2.0"
 
 for file in nimble-csp hpe-linux-config hpe-csi-k8s-{1.14,1.15,1.16,1.17,1.18}
 do
