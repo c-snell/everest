@@ -11,23 +11,13 @@ fi
 
 TEMPLATES_DIR="/templates"
 WORKSPACE_DIR="/workspace"
-# ADDON="harbor"
 ADDON="hpe-csi"
 CONFIG_FILE="/etc/bootstrap/config"
 VERSION="$(cat /etc/bootstrap/version)"
 FROM_VERSION="$(cat /etc/bootstrap/from_version)"
 K8S_VERSION="$(cat /tools/k8s_version)"
 
-# HARBOR_NAMESPACE="harbor"
-# HARBOR_SERVICE_NAME="harbor"
-HPE_CSI_NAMESPACE="hpe-csi"
-HPE_CSI_SERVICE_NAME="hpe-csi"
-
-
-prepare_values() {
-    # Create values.yaml in the workspace dir
-    sed "s|^\(\s*repository: \)|\1$bds_k8s_containerrepo|g" $CONFIG_FILE > $WORKSPACE_DIR/values.yaml
-}
+HPE_CSI_NAMESPACE="hpe-csi-driver"
 
 # Utility functions to set error and initialize on the deployment configmap
 set_deployment_success() {
@@ -58,7 +48,7 @@ set_upgrade_error() {
     kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"upgrade":"false","error":"true"}}'
 }
 
-# install related action for deploying harbor
+# install related action for deploying hpe-csi
 # bdconfig (bds_XXX_YYY) variables are available as environnment variables
 # /etc/bootstrap/config files are available through configmap
 install() {
@@ -68,11 +58,9 @@ install() {
     chmod 755 $WORKSPACE_DIR
     cp -a $TEMPLATES_DIR/* $WORKSPACE_DIR
 
-    prepare_values
-
     echo "installing chart $ADDON"
 
-    kubectl create namespace $ADDON
+    kubectl create namespace $HPE_CSI_NAMESPACE
 
     helm repo add hpe https://hpe-storage.github.io/co-deployments
 
