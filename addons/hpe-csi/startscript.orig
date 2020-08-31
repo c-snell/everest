@@ -1,5 +1,5 @@
 #! /bin/bash
-# Let us wait for some time for entrypoint to fire
+# Wait until entrypoint fires
 while ! [ -p /tmp/pipe ]; do sleep 5; done
 
 if grep -wq "true" /etc/bootstrap/debugMode; then
@@ -11,22 +11,17 @@ fi
 
 TEMPLATES_DIR="/templates"
 WORKSPACE_DIR="/workspace"
-# ADDON="harbor"
 ADDON="hpe-csi"
 CONFIG_FILE="/etc/bootstrap/config"
 VERSION="$(cat /etc/bootstrap/version)"
 FROM_VERSION="$(cat /etc/bootstrap/from_version)"
 K8S_VERSION="$(cat /tools/k8s_version)"
 
-# HARBOR_NAMESPACE="harbor"
-# HARBOR_SERVICE_NAME="harbor"
-HPE_CSI_NAMESPACE="hpe-csi"
-HPE_CSI_SERVICE_NAME="hpe-csi"
-
-
-prepare_values() {
-    # Create values.yaml in the workspace dir
-    sed "s|^\(\s*repository: \)|\1$bds_k8s_containerrepo|g" $CONFIG_FILE > $WORKSPACE_DIR/values.yaml
+hpe_csi_file() {
+    MAJOR_VER="${K8S_VERSION%%.*}"
+    REMAINDER="${K8S_VERSION#*.}"
+    MINOR_VER="${REMAINDER%%.*}"
+    echo hpe-csi-k8s-${MAJOR_VER}.${MINOR_VER}-template.yaml
 }
 
 # Utility functions to set error and initialize on the deployment configmap
@@ -58,50 +53,34 @@ set_upgrade_error() {
     kubectl patch configmap/hpecp-bootstrap-$ADDON --type merge -p '{"data":{"upgrade":"false","error":"true"}}'
 }
 
-# install related action for deploying harbor
+# install related action for deploying the nimble-csi
 # bdconfig (bds_XXX_YYY) variables are available as environnment variables
 # /etc/bootstrap/config files are available through configmap
 install() {
-    echo "$(date): Starting hpe-csi install process"
+    echo "$(date): Starting $ADDON install process"
 
     # copy from templates to workspace
     chmod 755 $WORKSPACE_DIR
     cp -a $TEMPLATES_DIR/* $WORKSPACE_DIR
 
-    prepare_values
+    HPE_CSI_TEMPLATE=$(hpe_csi_file)
 
-    echo "installing chart $ADDON"
+    cp "$WORKSPACE_DIR/$HPE_CSI_TEMPLATE"  $WORKSPACE_DIR/hpe-csi.yaml
+    sed -i -e "s|^\(\s*image: \)|\1$bds_k8s_containerrepo|g" $WORKSPACE_DIR/hpe-csi.yaml
 
-    kubectl create namespace $ADDON
+    cp $WORKSPACE_DIR/nimble-csp-template.yaml $WORKSPACE_DIR/nimble-csp.yaml
+    sed -i -e "s|^\(\s*image: \)|\1$bds_k8s_containerrepo|g" $WORKSPACE_DIR/nimble-csp.yaml
 
-    helm repo add hpe https://hpe-storage.github.io/co-deployments
-
-    helm repo update
-
-    if ! helm install install $ADDON hpe/hpe-csi-driver --version=1.3.0 --namespace $HPE_CSI_NAMESPACE; then
-         echo "failed to install helm charts"
-         set_deployment_error
-         return 0
-    fi
-
-    done
+    kubectl create -f $WORKSPACE_DIR/hpe-csi.yaml
+    kubectl create -f $WORKSPACE_DIR/nimble-csp.yaml
+    kubectl create -f $WORKSPACE_DIR/hpe-linux-config.yaml
 
     set_deployment_success
     return 0
 }
 
-upgrade() {
-    echo "$(date): Starting hpe-csi upgrade process"
-
-    prepare_values
-    
-    helm repo update
-
-    if ! helm upgrade hpe/hpe-csi-driver --version=1.3.0 --namespace $HPE_CSI_NAMESPACE; then
-         echo "failed to upgrade helm chart"
-         set_upgrade_error
-         return 0
-    fi
+reconfigure() {
+    echo "$(date): Starting $ADDON reconfigure process"
 
     set_reconfigure_success
     return 0
@@ -110,21 +89,20 @@ upgrade() {
 # TEMPLATES_DIR will have the templates from new image and
 # WORKSPACE_DIR will contain the existing modified ones.
 # FROM_VERSION will contain the version that we are upgrading from
-reconfigure() {
-    echo "$(date): Starting hpe-csi reconfigure process"
+upgrade() {
+    echo "$(date): Starting $ADDON upgrade process"
 
-    # TODO add code to reconfigure hpe-csi and test
-
-    set_reconfigure_success
+    set_upgrade_success
     return 0
 }
 
+
 rollback() {
-    echo "$(date): Starting hpe-csi rollback process"
+    echo "$(date): Starting $ADDON rollback process"
 
-    helm uninstall $ADDON --namespace $HPE_CSI_NAMESPACE
-
-    kubectl delete namespace $HPE_CSI_NAMESPACE
+    kubectl delete -f $WORKSPACE_DIR/hpe-linux-config.yaml
+    kubectl delete -f $WORKSPACE_DIR/nimble-csp.yaml
+    kubectl delete -f $WORKSPACE_DIR/hpe-csi.yaml
 
     clear_rollback
     return 0
