@@ -18,6 +18,7 @@ FROM_VERSION="$(cat /etc/bootstrap/from_version)"
 K8S_VERSION="$(cat /tools/k8s_version)"
 
 HPE_CSI_NAMESPACE="hpe-csi-driver"
+HPE_CSI_URL="https://hpe-storage.github.io/co-deployments"
 
 # Utility functions to set error and initialize on the deployment configmap
 set_deployment_success() {
@@ -62,7 +63,7 @@ install() {
 
     kubectl create namespace $HPE_CSI_NAMESPACE
 
-    helm repo add hpe https://hpe-storage.github.io/co-deployments
+    helm repo add hpe $HPE_CSI_URL
 
     helm repo update
 
