@@ -67,7 +67,7 @@ install() {
 
     helm repo update
 
-    if ! helm install install $ADDON hpe/hpe-csi-driver --version=1.3.0 --namespace $HPE_CSI_NAMESPACE; then
+    if ! helm install install $ADDON hpe/hpe-csi-driver --namespace $HPE_CSI_NAMESPACE; then
          echo "failed to install helm charts"
          set_deployment_error
          return 0
@@ -86,7 +86,7 @@ upgrade() {
     
     helm repo update
 
-    if ! helm upgrade hpe/hpe-csi-driver --version=1.3.0 --namespace $HPE_CSI_NAMESPACE; then
+    if ! helm upgrade hpe/hpe-csi-driver --namespace $HPE_CSI_NAMESPACE; then
          echo "failed to upgrade helm chart"
          set_upgrade_error
          return 0
